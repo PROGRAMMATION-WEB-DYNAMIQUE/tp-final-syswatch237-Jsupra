@@ -1,5 +1,6 @@
 use chrono::Local;
 use std::fmt;
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, Mutex};
@@ -184,14 +185,24 @@ fn format_response(snapshot: &SystemSnapshot, command: &str) -> String {
     }
 }
 
+// --- Logging ---
+
+fn log_action(message: &str) {
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open("syswatch.log") {
+        let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(file, "[{}] {}", timestamp, message);
+    }
+}
+
 // --- Serveur TCP ---
 
-fn handle_client(mut stream: TcpStream, shared_data: Arc<Mutex<SystemSnapshot>>) {
+fn handle_client(mut stream: TcpStream, shared_data: Arc<Mutex<SystemSnapshot>>, peer_addr: String) {
     let mut buffer = [0; 1024];
     loop {
         match stream.read(&mut buffer) {
             Ok(size) => {
                 if size == 0 {
+                    log_action(&format!("Déconnexion de {}", peer_addr));
                     break;
                 }
                 let command = String::from_utf8_lossy(&buffer[..size]).trim().to_string();
@@ -199,20 +210,27 @@ fn handle_client(mut stream: TcpStream, shared_data: Arc<Mutex<SystemSnapshot>>)
                     continue;
                 }
 
+                log_action(&format!("Commande reçue de {} : {}", peer_addr, command));
+
                 let response = {
                     let snapshot = shared_data.lock().unwrap();
                     format_response(&snapshot, &command)
                 };
 
                 if let Err(_) = stream.write_all(format!("{}\n", response).as_bytes()) {
+                    log_action(&format!("Erreur d'écriture vers {}", peer_addr));
                     break; // Client déconnecté
                 }
 
                 if command == "quit" {
+                    log_action(&format!("Déconnexion de {}", peer_addr));
                     break;
                 }
             }
-            Err(_) => break,
+            Err(_) => {
+                log_action(&format!("Erreur de lecture pour {}", peer_addr));
+                break;
+            }
         }
     }
 }
@@ -249,9 +267,12 @@ fn main() {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
+                let peer_addr = stream.peer_addr().map(|addr| addr.to_string()).unwrap_or_else(|_| "Inconnu".to_string());
+                log_action(&format!("Nouvelle connexion de {}", peer_addr));
+
                 let shared_data_client = Arc::clone(&shared_data);
                 thread::spawn(move || {
-                    handle_client(stream, shared_data_client);
+                    handle_client(stream, shared_data_client, peer_addr);
                 });
             }
             Err(e) => eprintln!("Erreur de connexion : {}", e),
